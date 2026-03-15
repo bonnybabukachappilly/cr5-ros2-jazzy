@@ -68,6 +68,7 @@ jobs:
           fi
 
       - name: Build workspace
+        shell: bash
         run: |
           . /opt/ros/jazzy/setup.bash
           if find src -name "package.xml" | grep -q .; then
@@ -78,6 +79,7 @@ jobs:
           fi
 
       - name: Run tests
+        shell: bash
         run: |
           . /opt/ros/jazzy/setup.bash
           if [ -d "install" ]; then
