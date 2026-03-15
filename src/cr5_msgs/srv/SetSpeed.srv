@@ -1,0 +1,4 @@
+float64 speed_percent
+---
+bool success
+string message
