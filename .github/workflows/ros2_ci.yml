@@ -41,9 +41,10 @@ jobs:
           fi
 
       - name: Lint XML
+        shell: bash
         run: |
           if find src -name "*.xml" | grep -q .; then
-            apt-get install -y ros-jazzy-ament-xmllint
+            . /opt/ros/jazzy/setup.bash
             find src -name "*.xml" | xargs -I{} ament_xmllint {}
           else
             echo "No XML files yet -- skipping"
