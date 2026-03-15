@@ -43,7 +43,7 @@ jobs:
       - name: Lint XML
         run: |
           if find src -name "*.xml" | grep -q .; then
-            find src -name "*.xml" -exec ament_xmllint {} +
+            python3 -m ament_xmllint $(find src -name "*.xml")
           else
             echo "No XML files yet -- skipping"
           fi
