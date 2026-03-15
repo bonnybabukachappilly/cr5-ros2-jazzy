@@ -43,7 +43,8 @@ jobs:
       - name: Lint XML
         run: |
           if find src -name "*.xml" | grep -q .; then
-            python3 -m ament_xmllint $(find src -name "*.xml")
+            apt-get install -y ros-jazzy-ament-xmllint
+            find src -name "*.xml" | xargs -I{} ament_xmllint {}
           else
             echo "No XML files yet -- skipping"
           fi
