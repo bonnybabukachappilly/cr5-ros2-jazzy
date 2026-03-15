@@ -1,0 +1,84 @@
+name: ROS2 CI
+
+on:
+  push:
+    branches: [ production, dev ]
+  pull_request:
+    branches: [ production, dev ]
+
+jobs:
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install lint tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            python3-ament-flake8 \
+            python3-ament-pep257 \
+            python3-ament-xmllint
+
+      - name: Lint Python (flake8)
+        run: |
+          find src -name "*.py" -exec ament_flake8 {} +
+        continue-on-error: false
+
+      - name: Lint Python (pep257)
+        run: |
+          find src -name "*.py" -exec ament_pep257 {} +
+        continue-on-error: false
+
+      - name: Lint XML
+        run: |
+          find src -name "*.xml" -exec ament_xmllint {} +
+        continue-on-error: false
+
+  build-and-test:
+    name: Build and Test
+    runs-on: ubuntu-24.04
+    needs: lint
+    container:
+      image: ros:jazzy-ros-base
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          apt-get update
+          rosdep update
+          rosdep install --from-paths src --ignore-src -r -y
+
+      - name: Build workspace
+        run: |
+          . /opt/ros/jazzy/setup.bash
+          colcon build --symlink-install \
+            --cmake-args -DCMAKE_BUILD_TYPE=Release
+
+      - name: Run tests
+        run: |
+          . /opt/ros/jazzy/setup.bash
+          . install/setup.bash
+          colcon test --return-code-on-test-failure
+
+      - name: Show test results
+        if: always()
+        run: |
+          . /opt/ros/jazzy/setup.bash
+          colcon test-result --verbose
+
+  dependency-check:
+    name: Dependency Check
+    runs-on: ubuntu-24.04
+    container:
+      image: ros:jazzy-ros-base
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check all dependencies declared
+        run: |
+          rosdep update
+          rosdep check --from-paths src --ignore-src
