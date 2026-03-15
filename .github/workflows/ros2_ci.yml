@@ -1,0 +1,108 @@
+name: ROS2 CI
+
+on:
+  push:
+    branches: [ production, dev ]
+  pull_request:
+    branches: [ production, dev ]
+
+jobs:
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+    container:
+      image: ros:jazzy-ros-base
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install lint tools
+        run: |
+          apt-get update
+          apt-get install -y \
+            ros-jazzy-ament-flake8 \
+            ros-jazzy-ament-pep257 \
+            ros-jazzy-ament-xmllint
+
+      - name: Lint Python (flake8)
+        run: |
+          if find src -name "*.py" | grep -q .; then
+            find src -name "*.py" -exec ament_flake8 {} +
+          else
+            echo "No Python files yet -- skipping"
+          fi
+
+      - name: Lint Python (pep257)
+        run: |
+          if find src -name "*.py" | grep -q .; then
+            find src -name "*.py" -exec ament_pep257 {} +
+          else
+            echo "No Python files yet -- skipping"
+          fi
+
+      - name: Lint XML
+        run: |
+          if find src -name "*.xml" | grep -q .; then
+            find src -name "*.xml" -exec ament_xmllint {} +
+          else
+            echo "No XML files yet -- skipping"
+          fi
+
+  build-and-test:
+    name: Build and Test
+    runs-on: ubuntu-24.04
+    needs: lint
+    container:
+      image: ros:jazzy-ros-base
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          apt-get update
+          rosdep update --rosdistro jazzy
+          if find src -name "package.xml" | grep -q .; then
+            rosdep install --from-paths src --ignore-src -r -y
+          else
+            echo "No packages yet -- skipping rosdep install"
+          fi
+
+      - name: Build workspace
+        shell: bash
+        run: |
+          . /opt/ros/jazzy/setup.bash
+          if find src -name "package.xml" | grep -q .; then
+            colcon build --symlink-install \
+              --cmake-args -DCMAKE_BUILD_TYPE=Release
+          else
+            echo "No packages yet -- skipping build"
+          fi
+
+      - name: Run tests
+        shell: bash
+        run: |
+          . /opt/ros/jazzy/setup.bash
+          if [ -d "install" ]; then
+            . install/setup.bash
+            colcon test --return-code-on-test-failure
+          else
+            echo "Nothing built yet -- skipping tests"
+          fi
+
+  dependency-check:
+    name: Dependency Check
+    runs-on: ubuntu-24.04
+    container:
+      image: ros:jazzy-ros-base
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check all dependencies declared
+        run: |
+          apt-get update
+          rosdep update --rosdistro jazzy
+          if find src -name "package.xml" | grep -q .; then
+            rosdep check --from-paths src --ignore-src
+          else
+            echo "No packages yet -- skipping dependency check"
+          fi
