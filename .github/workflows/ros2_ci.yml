@@ -2,12 +2,11 @@ name: ROS2 CI
 
 on:
   push:
-    branches: [ production, dev ]
+    branches: [production, dev]
   pull_request:
-    branches: [ production, dev ]
+    branches: [production, dev]
 
 jobs:
-
   lint:
     name: Lint
     runs-on: ubuntu-24.04
@@ -93,6 +92,18 @@ jobs:
             colcon test --return-code-on-test-failure
           else
             echo "Nothing built yet -- skipping tests"
+          fi
+
+      - name: Show test results
+        shell: bash
+        if: always()
+        run: |
+          . /opt/ros/jazzy/setup.bash
+          if [ -d "install" ]; then
+            . install/setup.bash
+            colcon test-result --verbose
+          else
+            echo "No test results yet"
           fi
 
   dependency-check:
