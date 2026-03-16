@@ -156,7 +156,7 @@ class FeedbackClient:
             else:
                 raise ConnectionError('CR5 closed the feedback connection')
         data = bytes(self._buffer[:n])
-        self._buffer = self._buffer[n:]
+        del self._buffer[:n]
         return data
 
     def _sync_to_packet_boundary(self) -> None:
@@ -193,10 +193,10 @@ class FeedbackClient:
             elif idx > 0:
                 # Discard bytes before the header
                 discarded += idx
-                self._buffer = self._buffer[idx:]
+                del self._buffer[:idx]
 
             else:
                 # Magic not found -- discard all but last 3 bytes
                 # (header might be split across next recv)
                 discarded += len(self._buffer) - 3
-                self._buffer = self._buffer[-3:]
+                del self._buffer[:-3]
