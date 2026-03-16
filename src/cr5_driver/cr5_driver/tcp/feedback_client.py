@@ -13,6 +13,8 @@ import struct
 import threading
 import time
 from typing import Callable, cast, Optional
+from cr5_driver.tcp.feedback_parser import EXPECTED_TEST_VALUE, PACKET_SIZE
+
 
 
 PACKET_SIZE = 1440
@@ -76,10 +78,11 @@ class FeedbackClient:
 
     def _run_loop(self) -> None:
         """
-        Run main feedback loop run in background thread.
+        Run main feedback loop -- runs in background thread.
 
         Connects, syncs to packet boundary, then continuously
-        reads packets and calls the callback. Reconnects on error.
+        reads packets and calls the callback. Re-syncs on
+        bad packets, reconnects on connection errors.
         """
         while self._running:
             try:
@@ -88,7 +91,16 @@ class FeedbackClient:
                 self.logger.info('Synced to packet boundary -- reading')
 
                 while self._running:
-                    raw: bytes = self._read_exact(PACKET_SIZE)
+                    raw = self._read_exact(PACKET_SIZE)
+
+                    # Verify test value -- drop bad packets silently
+                    test_val = struct.unpack_from('<Q', raw, 48)[0]
+                    if test_val != EXPECTED_TEST_VALUE:
+                        self.logger.debug(
+                            f'Dropped bad packet (TestValue={hex(test_val)})'
+                        )
+                        continue
+
                     self.callback(raw)
 
             except (ConnectionError, OSError, socket.timeout) as e:
@@ -99,7 +111,6 @@ class FeedbackClient:
                     )
                     self._disconnect()
                     self._buffer.clear()
-
                     time.sleep(self.RECONNECT_DELAY)
 
     def _connect(self) -> None:

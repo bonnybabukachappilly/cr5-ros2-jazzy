@@ -12,11 +12,11 @@
     ],
     "cmake.ignoreCMakeListsMissing": true,
     "python.autoComplete.extraPaths": [
-        "./ros_ws/install/**/lib/python3.*/site-packages",
-        "./ros_ws/build/cr5_msgs/rosidl_generator_py"
+        "./install/**/lib/python3.*/site-packages",
+        "./build/cr5_msgs/rosidl_generator_py"
     ],
     "python.analysis.extraPaths": [
-        "./ros_ws/install/**/lib/python3.*/site-packages",
-        "./ros_ws/build/cr5_msgs/rosidl_generator_py"
+        "./install/**/lib/python3.*/site-packages",
+        "./build/cr5_msgs/rosidl_generator_py"
     ]
 }

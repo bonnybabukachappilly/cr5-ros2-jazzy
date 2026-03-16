@@ -12,6 +12,7 @@ Without it all commands return 'Control Mode Is Not Tcp' error.
 import contextlib
 import logging
 import socket
+import threading
 import time
 from typing import Any, cast, Optional
 
@@ -48,6 +49,9 @@ class DashboardClient:
         self.robot_ip: str = robot_ip
         self.sock: Optional[socket.socket] = None
         self.logger: logging.Logger = logging.getLogger(__name__)
+        
+        self._keepalive_running: bool = False
+        self._keepalive_thread: Optional[threading.Thread] = None
 
     def connect(self) -> None:
         """
@@ -55,7 +59,7 @@ class DashboardClient:
 
         MUST be called before any other method.
         RequestControl() is sent immediately after connection.
-
+        Starts a keepalive thread to prevent idle disconnection.
         """
         self.logger.info(f'Connecting to {self.robot_ip}:{self.PORT}')
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -67,8 +71,35 @@ class DashboardClient:
         self._send_and_check('RequestControl()')
         self.logger.info('TCP mode activated')
 
+        # Start keepalive to prevent idle disconnection
+        self._keepalive_running = True
+        self._keepalive_thread = threading.Thread(
+            target=self._keepalive_loop,
+            name='cr5_dashboard_keepalive',
+            daemon=True
+        )
+        self._keepalive_thread.start()
+
+    def _keepalive_loop(self) -> None:
+        """
+        Send periodic RobotMode() to keep port 29999 alive.
+
+        Port 29999 closes idle connections after ~10 seconds.
+        Sending every 5 seconds prevents disconnection.
+        """
+        while self._keepalive_running:
+            time.sleep(5.0)
+            if not self._keepalive_running:
+                break
+            try:
+                self._send_and_check('RobotMode()')
+                self.logger.debug('Keepalive sent')
+            except (DashboardError, OSError) as e:
+                self.logger.warning(f'Keepalive failed: {e}')
+
     def disconnect(self) -> None:
         """Close the dashboard connection."""
+        self._keepalive_running = False
         if self.sock:
             with contextlib.suppress(OSError):
                 self.sock.close()
@@ -103,13 +134,13 @@ class DashboardClient:
         self._send_and_check('ClearError()')
         self.logger.info('Errors cleared')
 
-    def set_speed(self, speed_percent: float) -> None:
+    def set_speed(self, speed_percent: int) -> None:
         """
         Set global speed factor.
 
         Parameters
         ----------
-        speed_percent : float
+        speed_percent : int
             Speed as percentage 1-100.
 
         """
@@ -187,12 +218,18 @@ class DashboardClient:
         if not self.sock:
             raise RuntimeError('Not connected -- call connect() first')
 
-        raw: bytes = (command + '\n').encode('ascii')
-        self.sock.sendall(raw)
-        self.logger.debug(f'Sent: {command}')
-
-        response: str = self._read_response()
-        self.logger.debug(f'Received: {response}')
+        try:
+            raw: bytes = (command + '\n').encode('ascii')
+            self.sock.sendall(raw)
+            self.logger.debug(f'Sent: {command}')
+            response: str = self._read_response()
+            self.logger.debug(f'Received: {response}')
+        except (ConnectionResetError, BrokenPipeError, OSError):
+            self.logger.warning('Dashboard connection lost -- reconnecting')
+            self._reconnect()
+            raw = (command + '\n').encode('ascii')
+            self.sock.sendall(raw)
+            response = self._read_response()
 
         error_id: int = self._parse_error_id(response)
         if error_id != 0:
@@ -201,6 +238,21 @@ class DashboardClient:
                 f'{response}'
             )
         return response
+
+    def _reconnect(self) -> None:
+        """
+        Reconnect to dashboard port after connection loss.
+
+        Re-sends RequestControl() after reconnecting.
+        """
+        self.logger.info(f'Reconnecting to {self.robot_ip}:{self.PORT}')
+        with contextlib.suppress(OSError):
+            self.sock.close()
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.settimeout(self.TIMEOUT)
+        self.sock.connect((self.robot_ip, self.PORT))
+        self._send_and_check('RequestControl()')
+        self.logger.info('Reconnected to dashboard port')
 
     def _read_response(self) -> str:
         """
