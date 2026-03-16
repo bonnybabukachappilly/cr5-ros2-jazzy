@@ -28,7 +28,7 @@ class DashboardClient:
 
     Sends ASCII commands and parses responses in the format:
     ErrorID,{return_values},CommandName(params);
-    
+
     """
 
     PORT = 29999
@@ -43,7 +43,7 @@ class DashboardClient:
         ----------
         robot_ip : str
             IP address of the CR5 controller.
-            
+
         """
         self.robot_ip: str = robot_ip
         self.sock: Optional[socket.socket] = None
@@ -55,7 +55,7 @@ class DashboardClient:
 
         MUST be called before any other method.
         RequestControl() is sent immediately after connection.
-        
+
         """
         self.logger.info(f'Connecting to {self.robot_ip}:{self.PORT}')
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -81,7 +81,7 @@ class DashboardClient:
 
         Takes approximately 10 seconds to complete.
         Always wait after calling this before sending EnableRobot.
-        
+
         """
         self._send_and_check('PowerOn()')
         self.logger.info('PowerOn sent -- waiting 10 seconds...')
@@ -111,7 +111,7 @@ class DashboardClient:
         ----------
         speed_percent : float
             Speed as percentage 1-100.
-            
+
         """
         speed: int = int(max(1, min(100, speed_percent)))
         self._send_and_check(f'SpeedFactor({speed})')
@@ -128,7 +128,7 @@ class DashboardClient:
             1=Initialising, 2=Brake released, 3=Disabled,
             4=Enabled, 5=Backdrive, 6=Running, 7=Recording,
             8=Error, 9=Paused, 10=Jogging.
-            
+
         """
         response: str = self._send_and_check('RobotMode()')
         return self._parse_return_value(response, int)
@@ -156,7 +156,7 @@ class DashboardClient:
             Target RZ orientation in degrees.
         speed : float
             Move speed as percentage 1-100.
-            
+
         """
         clamped_speed = max(1.0, min(100.0, speed))
         self._send_and_check(f'SpeedFactor({clamped_speed})')
@@ -182,7 +182,7 @@ class DashboardClient:
             If ErrorID is non-zero.
         RuntimeError
             If not connected.
-            
+
         """
         if not self.sock:
             raise RuntimeError('Not connected -- call connect() first')
@@ -210,7 +210,7 @@ class DashboardClient:
         -------
         str
             Response string stripped of whitespace.
-            
+
         """
         sock: socket.socket = cast(socket.socket, self.sock)
         data: bytes = sock.recv(self.BUFFER_SIZE)
@@ -229,7 +229,7 @@ class DashboardClient:
         -------
         int
             ErrorID as integer.
-            
+
         """
         try:
             return int(response.split(',')[0])
@@ -253,7 +253,7 @@ class DashboardClient:
         -------
         Any
             Extracted return value cast to cast_type.
-            
+
         """
         try:
             start: int = response.index('{') + 1
