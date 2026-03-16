@@ -11,6 +11,7 @@ import logging
 import socket
 import struct
 import threading
+import time
 from typing import Callable, cast, Optional
 
 
@@ -98,7 +99,6 @@ class FeedbackClient:
                     )
                     self._disconnect()
                     self._buffer.clear()
-                    import time
 
                     time.sleep(self.RECONNECT_DELAY)
 
