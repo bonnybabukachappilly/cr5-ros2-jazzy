@@ -12,7 +12,7 @@ import contextlib
 import logging
 import socket
 import time
-from typing import Any, Optional, cast
+from typing import Any, cast, Optional
 
 
 class DashboardError(Exception):
