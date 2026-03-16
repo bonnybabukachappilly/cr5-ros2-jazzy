@@ -11,7 +11,7 @@ import logging
 import socket
 import struct
 import threading
-from typing import Callable, Optional, cast
+from typing import Callable, cast, Optional
 
 
 PACKET_SIZE = 1440
