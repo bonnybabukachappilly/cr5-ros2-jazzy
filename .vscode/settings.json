@@ -1,11 +1,22 @@
 {
+    "editor.formatOnSave": true,
+    "[python]": {
+        "editor.defaultFormatter": "ms-python.python"
+    },
+    "isort.args": [
+        "--force-sort-within-sections",
+        "--case-sensitive"
+    ],
+    "flake8.args": [
+        "--extend-ignore=I101"
+    ],
     "cmake.ignoreCMakeListsMissing": true,
     "python.autoComplete.extraPaths": [
         "./ros_ws/install/**/lib/python3.*/site-packages",
-        // "./ros_ws/build/stratasys_msgs/rosidl_generator_py"
+        "./ros_ws/build/cr5_msgs/rosidl_generator_py"
     ],
     "python.analysis.extraPaths": [
         "./ros_ws/install/**/lib/python3.*/site-packages",
-        // "./ros_ws/build/stratasys_msgs/rosidl_generator_py"
-    ],
+        "./ros_ws/build/cr5_msgs/rosidl_generator_py"
+    ]
 }
