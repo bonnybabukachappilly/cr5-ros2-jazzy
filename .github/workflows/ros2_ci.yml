@@ -41,9 +41,11 @@ jobs:
           fi
 
       - name: Lint XML
+        shell: bash
         run: |
           if find src -name "*.xml" | grep -q .; then
-            find src -name "*.xml" -exec ament_xmllint {} +
+            . /opt/ros/jazzy/setup.bash
+            find src -name "*.xml" | xargs -I{} ament_xmllint {}
           else
             echo "No XML files yet -- skipping"
           fi
