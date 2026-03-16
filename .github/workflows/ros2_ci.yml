@@ -25,17 +25,21 @@ jobs:
             ros-jazzy-ament-xmllint
 
       - name: Lint Python (flake8)
+        shell: bash
         run: |
           if find src -name "*.py" | grep -q .; then
-            find src -name "*.py" -exec ament_flake8 {} +
+            . /opt/ros/jazzy/setup.bash
+            find src -name "*.py" | xargs ament_flake8
           else
             echo "No Python files yet -- skipping"
           fi
 
       - name: Lint Python (pep257)
+        shell: bash
         run: |
           if find src -name "*.py" | grep -q .; then
-            find src -name "*.py" -exec ament_pep257 {} +
+            . /opt/ros/jazzy/setup.bash
+            find src -name "*.py" | xargs ament_pep257
           else
             echo "No Python files yet -- skipping"
           fi
