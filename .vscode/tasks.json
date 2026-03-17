@@ -33,6 +33,21 @@
             "problemMatcher": []
         },
         {
+            "label": "Colcon: Build Select",
+            "type": "shell",
+            "linux": {
+                "command": "colcon build --packages-select ${input:ros_pkg_name}"
+            },
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            },
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": []
+        },
+        {
             "label": "Colcon: Clean Build",
             "type": "shell",
             "linux": {
@@ -150,6 +165,16 @@
             "default": "moveit_sim.launch.py",
             "options": [
                 "moveit_sim.launch.py",
+            ]
+        },
+        {
+            "id": "ros_pkg_name",
+            "type": "pickString",
+            "description": "Which package you want to build?",
+            "default": "cr5_driver",
+            "options": [
+                "cr5_driver",
+                "cr5_msgs",
             ]
         }
     ]

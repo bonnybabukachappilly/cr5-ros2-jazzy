@@ -15,9 +15,13 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/CartesianPose.msg"
   "srv/EnableRobot.srv"
   "srv/DisableRobot.srv"
+  "srv/EmptyRequest.srv"
   "srv/ClearError.srv"
   "srv/SetSpeed.srv"
+  "srv/SetPayload.srv"
+  "srv/SetMotionParams.srv"
   "srv/MoveJ.srv"
+  "srv/RequestControl.srv"
   "srv/RobotMode.srv"
   DEPENDENCIES std_msgs
 )

@@ -1,318 +1,190 @@
 """
-DashboardClient -- TCP connection to Dobot CR5 port 29999.
+DobotDashboardClient -- TCP client for CR5 command/control port.
 
-Handles all control commands: RequestControl, PowerOn, EnableRobot,
-DisableRobot, ClearError, SpeedFactor, RobotMode.
+Connects to port 29999 for sending dashboard commands. Commands are
+string-based and responses follow the format:
+ErrorID,{return_values},CommandName(param1,param2,...);
 
-CRITICAL: RequestControl() must be called first on every connection.
-Without it all commands return 'Control Mode Is Not Tcp' error.
-
+Usage:
+    client = get_dashboard_client('192.168.0.141', log)
+    client.start()
+    resp = client.send_command('EnableRobot()')
+    print(f"Error ID: {resp.error_id}")
 """
+from __future__ import annotations
 
 import contextlib
-import logging
-import socket
 import threading
-import time
-from typing import Any, cast, Optional
+from functools import lru_cache
+from socket import AF_INET, SHUT_RDWR, SOCK_STREAM, socket
+from threading import Lock
+from typing import Optional, Self
+
+from cr5_driver.robot.dashboard_model import DobotDashboardModel
+
+from rclpy.impl.rcutils_logger import RcutilsLogger
 
 
-class DashboardError(Exception):
-    """Raised when the CR5 returns a non-zero ErrorID."""
-
-    pass
-
-
-class DashboardClient:
+class DobotDashboardClient:
     """
-    TCP client for CR5 Dashboard port (29999).
+    TCP client for CR5 control port (29999).
 
-    Sends ASCII commands and parses responses in the format:
-    ErrorID,{return_values},CommandName(params);
-
+    Provides a thread-safe send_command method that blocks until
+    a full response (terminated by ';') is received.
     """
 
-    PORT = 29999
-    TIMEOUT = 5.0
-    BUFFER_SIZE = 1024
+    _instance: Optional[Self] = None
 
-    def __init__(self, robot_ip: str) -> None:
+    __slots__ = (
+        '_host', '_port', '_socket',
+        '_log', '_lock', '_timeout'
+    )
+
+    def __new__(cls, host: Optional[str] = None,
+                log: Optional[RcutilsLogger] = None,
+                port: int = 29999) -> Self:
+
+        if cls._instance is None:
+            if host is None or log is None:
+                raise RuntimeError(
+                    "Missing 2 required positional arguments: 'host' and 'log'"
+                )
+
+            cls._instance = super().__new__(cls)
+
+        return cls._instance
+
+    def __init__(
+            self,
+            host: Optional[str] = None,
+            log: Optional[RcutilsLogger] = None,
+            port: int = 29999,
+            timeout: float = 5.0
+    ) -> None:
         """
-        Initialise client with robot IP address.
+        Initialise the dashboard client.
 
         Parameters
         ----------
-        robot_ip : str
+        host : str
             IP address of the CR5 controller.
+        log : RcutilsLogger
+            ROS2 node logger for info and error messages.
+        port : int
+            Dashboard port number. Default 29999.
+        timeout : float
+            Socket timeout in seconds. Default 5.0.
 
         """
-        self.robot_ip: str = robot_ip
-        self.sock: Optional[socket.socket] = None
-        self.logger: logging.Logger = logging.getLogger(__name__)
-        
-        self._keepalive_running: bool = False
-        self._keepalive_thread: Optional[threading.Thread] = None
+        if hasattr(self, '_host') and hasattr(self, '_log'):
+            return
 
-    def connect(self) -> None:
+        assert host is not None
+        assert log is not None
+
+        self._host: str = host
+        self._port: int = port
+        self._log: RcutilsLogger = log
+        self._timeout: float = timeout
+        self._socket: Optional[socket] = None
+        self._lock: Lock = threading.Lock()
+
+    def start(self) -> None:
         """
-        Connect to dashboard port and switch to TCP mode.
+        Establish connection to the dashboard port.
 
-        MUST be called before any other method.
-        RequestControl() is sent immediately after connection.
-        Starts a keepalive thread to prevent idle disconnection.
-        """
-        self.logger.info(f'Connecting to {self.robot_ip}:{self.PORT}')
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.settimeout(self.TIMEOUT)
-        self.sock.connect((self.robot_ip, self.PORT))
-        self.logger.info('Connected to dashboard port')
-
-        # MANDATORY FIRST COMMAND -- switch robot to TCP mode
-        self._send_and_check('RequestControl()')
-        self.logger.info('TCP mode activated')
-
-        # Start keepalive to prevent idle disconnection
-        self._keepalive_running = True
-        self._keepalive_thread = threading.Thread(
-            target=self._keepalive_loop,
-            name='cr5_dashboard_keepalive',
-            daemon=True
-        )
-        self._keepalive_thread.start()
-
-    def _keepalive_loop(self) -> None:
-        """
-        Send periodic RobotMode() to keep port 29999 alive.
-
-        Port 29999 closes idle connections after ~10 seconds.
-        Sending every 5 seconds prevents disconnection.
-        """
-        while self._keepalive_running:
-            time.sleep(5.0)
-            if not self._keepalive_running:
-                break
-            try:
-                self._send_and_check('RobotMode()')
-                self.logger.debug('Keepalive sent')
-            except (DashboardError, OSError) as e:
-                self.logger.warning(f'Keepalive failed: {e}')
-
-    def disconnect(self) -> None:
-        """Close the dashboard connection."""
-        self._keepalive_running = False
-        if self.sock:
-            with contextlib.suppress(OSError):
-                self.sock.close()
-            self.sock = None
-            self.logger.info('Dashboard connection closed')
-
-    def power_on(self) -> None:
-        """
-        Power on the robot arm.
-
-        Takes approximately 10 seconds to complete.
-        Always wait after calling this before sending EnableRobot.
-
-        """
-        self._send_and_check('PowerOn()')
-        self.logger.info('PowerOn sent -- waiting 10 seconds...')
-        time.sleep(10.0)
-        self.logger.info('Power-on wait complete')
-
-    def enable_robot(self) -> None:
-        """Enable the robot arm."""
-        self._send_and_check('EnableRobot()')
-        self.logger.info('Robot enabled')
-
-    def disable_robot(self) -> None:
-        """Disable the robot arm."""
-        self._send_and_check('DisableRobot()')
-        self.logger.info('Robot disabled')
-
-    def clear_error(self) -> None:
-        """Clear robot error state."""
-        self._send_and_check('ClearError()')
-        self.logger.info('Errors cleared')
-
-    def set_speed(self, speed_percent: int) -> None:
-        """
-        Set global speed factor.
-
-        Parameters
-        ----------
-        speed_percent : int
-            Speed as percentage 1-100.
-
-        """
-        speed: int = int(max(1, min(100, speed_percent)))
-        self._send_and_check(f'SpeedFactor({speed})')
-        self.logger.info(f'Speed set to {speed}%')
-
-    def get_robot_mode(self) -> int:
-        """
-        Get current robot mode.
-
-        Returns
-        -------
-        int
-            Mode integer. Common values:
-            1=Initialising, 2=Brake released, 3=Disabled,
-            4=Enabled, 5=Backdrive, 6=Running, 7=Recording,
-            8=Error, 9=Paused, 10=Jogging.
-
-        """
-        response: str = self._send_and_check('RobotMode()')
-        return self._parse_return_value(response, int)
-
-    def move_j(
-            self, x: float, y: float, z: float,
-            rx: float, ry: float, rz: float,
-            speed: float = 50.0) -> None:
-        """
-        Send a joint move command to Cartesian target.
-
-        Parameters
-        ----------
-        x : float
-            Target X position in mm.
-        y : float
-            Target Y position in mm.
-        z : float
-            Target Z position in mm.
-        rx : float
-            Target RX orientation in degrees.
-        ry : float
-            Target RY orientation in degrees.
-        rz : float
-            Target RZ orientation in degrees.
-        speed : float
-            Move speed as percentage 1-100.
-
-        """
-        clamped_speed = max(1.0, min(100.0, speed))
-        self._send_and_check(f'SpeedFactor({clamped_speed})')
-        self._send_and_check(f'MovJ({x},{y},{z},{rx},{ry},{rz})')
-
-    def _send_and_check(self, command: str) -> str:
-        """
-        Send command and verify ErrorID is 0.
-
-        Parameters
-        ----------
-        command : str
-            ASCII command string without newline.
-
-        Returns
-        -------
-        str
-            Full response string.
+        Connects the socket and immediately sends RequestControl()
+        to activate TCP mode. Must be called before send_command.
 
         Raises
         ------
-        DashboardError
-            If ErrorID is non-zero.
-        RuntimeError
-            If not connected.
+        ConnectionError
+            If the robot is not reachable at host:port.
 
         """
-        if not self.sock:
-            raise RuntimeError('Not connected -- call connect() first')
+        self._log.info(
+            f'Connecting to dashboard port at {self._host}:{self._port}'
+        )
+        self._socket = socket(AF_INET, SOCK_STREAM)
+        self._socket.settimeout(self._timeout)
+        self._socket.connect((self._host, self._port))
+        self._log.info('Connected to dashboard port')
+        self.send_command('RequestControl()')
+        self._log.info('TCP mode activated')
 
-        try:
-            raw: bytes = (command + '\n').encode('ascii')
-            self.sock.sendall(raw)
-            self.logger.debug(f'Sent: {command}')
-            response: str = self._read_response()
-            self.logger.debug(f'Received: {response}')
-        except (ConnectionResetError, BrokenPipeError, OSError):
-            self.logger.warning('Dashboard connection lost -- reconnecting')
-            self._reconnect()
-            raw = (command + '\n').encode('ascii')
-            self.sock.sendall(raw)
-            response = self._read_response()
-
-        error_id: int = self._parse_error_id(response)
-        if error_id != 0:
-            raise DashboardError(
-                f'Command "{command}" failed with ErrorID {error_id}: '
-                f'{response}'
-            )
-        return response
-
-    def _reconnect(self) -> None:
+    def stop(self) -> None:
         """
-        Reconnect to dashboard port after connection loss.
+        Close the dashboard connection cleanly.
 
-        Re-sends RequestControl() after reconnecting.
+        Safe to call multiple times.
         """
-        self.logger.info(f'Reconnecting to {self.robot_ip}:{self.PORT}')
-        with contextlib.suppress(OSError):
-            self.sock.close()
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.settimeout(self.TIMEOUT)
-        self.sock.connect((self.robot_ip, self.PORT))
-        self._send_and_check('RequestControl()')
-        self.logger.info('Reconnected to dashboard port')
+        if self._socket:
+            with contextlib.suppress(Exception):
+                self._socket.shutdown(SHUT_RDWR)
+                self._socket.close()
+            self._socket = None
+        self._log.info('Dashboard connection closed')
 
-    def _read_response(self) -> str:
+    def send_command(self, cmd: str) -> DobotDashboardModel:
         """
-        Read response from dashboard port.
-
-        Returns
-        -------
-        str
-            Response string stripped of whitespace.
-
+        Send a dashboard command with automatic reconnection on failure.
         """
-        sock: socket.socket = cast(socket.socket, self.sock)
-        data: bytes = sock.recv(self.BUFFER_SIZE)
-        return data.decode('ascii').strip()
+        if not cmd.endswith('\n'):
+            cmd += '\n'
 
-    def _parse_error_id(self, response: str) -> int:
+        with self._lock:
+            try:
+                # First Attempt
+                return self._execute_transaction(cmd)
+            except (OSError, ConnectionError) as e:
+                self._log.warning(
+                    f'Dashboard connection lost, attempting reconnect... ({e})')
+
+                try:
+                    # Clean up old socket and try to re-establish
+                    self.stop()
+                    self.start()
+
+                    # Second Attempt
+                    return self._execute_transaction(cmd)
+                except Exception as retry_error:
+                    self._log.error(
+                        f'Auto-reconnect failed for [{cmd.strip()}]: {retry_error}')
+                    raise ConnectionError(
+                        f"Robot unreachable after reconnect: {retry_error}") from retry_error
+
+    def _execute_transaction(self, cmd: str) -> DobotDashboardModel:
+        """Internal helper to handle the raw send/recv logic."""
+        if not self._socket:
+            raise ConnectionError('Dashboard socket is not connected.')
+
+        self._socket.sendall(cmd.encode('utf-8'))
+        response_buffer: str = ''
+
+        while ';' not in response_buffer:
+            if chunk := self._socket.recv(4096).decode('utf-8'):
+                response_buffer += chunk
+
+            else:
+                raise ConnectionError('Robot closed the dashboard connection.')
+        # Dobot sometimes sends multiple responses if commands were queued;
+        # ensure we only parse the relevant one.
+        first_response: str = response_buffer.strip().split('\n')[0]
+        return self._parse_response(first_response)
+
+    def _parse_response(self, response: str) -> DobotDashboardModel:
         """
-        Extract ErrorID from response string.
+        Convert raw response string to model instance.
 
         Parameters
         ----------
         response : str
-            Raw response string from robot.
+            Raw response string from the robot.
 
         Returns
         -------
-        int
-            ErrorID as integer.
+        DobotDashboardModel
+            Parsed response model.
 
         """
-        try:
-            return int(response.split(',')[0])
-        except (ValueError, IndexError) as e:
-            raise DashboardError(
-                f'Could not parse ErrorID from response: {response}'
-            ) from e
-
-    def _parse_return_value(self, response: str, cast_type: type = str) -> Any:
-        """
-        Extract return value from response string.
-
-        Parameters
-        ----------
-        response : str
-            Raw response string from robot.
-        cast_type : type
-            Type to cast the extracted value to.
-
-        Returns
-        -------
-        Any
-            Extracted return value cast to cast_type.
-
-        """
-        try:
-            start: int = response.index('{') + 1
-            end: int = response.index('}')
-            value: str = response[start:end].strip()
-            return cast_type(value)
-        except (ValueError, IndexError) as e:
-            raise DashboardError(
-                f'Could not parse return value from response: {response}'
-            ) from e
+        return DobotDashboardModel.from_str(response)
