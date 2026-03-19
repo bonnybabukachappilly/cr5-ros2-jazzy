@@ -10,8 +10,8 @@ All values are little-endian.
 
 from __future__ import annotations
 
-import struct
 from dataclasses import dataclass
+import struct
 
 
 @dataclass(frozen=True)

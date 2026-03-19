@@ -1,335 +1,323 @@
+"""
+ControlService -- ROS2 service handlers for CR5 robot control.
+
+Registers and handles all control-related ROS2 services that
+map directly to Dobot dashboard commands on port 29999.
+
+Services registered:
+    clear_error       -- Clear robot error state
+    disable_robot     -- Disable the robot arm
+    enable_robot      -- Enable the robot arm with optional load
+    request_control   -- Switch robot to TCP control mode
+    stop              -- Stop current execution
+    pause             -- Pause current execution
+    continue          -- Continue paused execution
+    e_stop/activate   -- Activate emergency stop
+    e_stop/release    -- Release emergency stop
+    drag/enable       -- Enter drag mode
+    drag/disable      -- Exit drag mode
+"""
 
 from functools import partial
-from typing import Optional
+
 
 from cr5_driver.robot.dashboard_model import DobotDashboardModel
 from cr5_driver.tcp import DobotDashboardClient
 
-from cr5_msgs.srv import (
-    EnableRobot, EmptyRequest
-)
+from cr5_msgs.srv import EmptyRequest, EnableRobot
 from cr5_msgs.srv._empty_request import (
-    EmptyRequest_Request as EReq_req, EmptyRequest_Response as EReq_Resp
+    EmptyRequest_Request as EReq_req,
+    EmptyRequest_Response as EReq_Resp,
 )
 from cr5_msgs.srv._enable_robot import (
-    EnableRobot_Request as ER_req, EnableRobot_Response as ER_resp
+    EnableRobot_Request as ER_req,
+    EnableRobot_Response as ER_resp,
 )
 
-
-from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.impl.rcutils_logger import RcutilsLogger
 from rclpy.node import Node
 
 
 class ControlService:
-    def __init__(self, node: Node) -> None:
-        self._log: RcutilsLogger = node.get_logger()
+    """
+    ROS2 service handlers for CR5 robot control commands.
 
+    All services delegate to DobotDashboardClient which manages
+    the TCP connection to port 29999. Uses ReentrantCallbackGroup
+    to allow concurrent service execution.
+    """
+
+    def __init__(self, node: Node) -> None:
+        """
+        Initialise and register all control services on the node.
+
+        Parameters
+        ----------
+        node : Node
+            ROS2 node to register services on.
+
+        """
+        self._log: RcutilsLogger = node.get_logger()
         self._log.info('Starting control services...')
 
-        cb = MutuallyExclusiveCallbackGroup()
+        cb = ReentrantCallbackGroup()
 
-        # Clear Error
         node.create_service(
-            srv_type=EmptyRequest,
-            srv_name='clear_error',
-            callback=self._clear_error,
-            callback_group=cb
+            EmptyRequest, 'clear_error',
+            self._clear_error, callback_group=cb
         )
-
-        # Disable Robot
         node.create_service(
-            srv_type=EmptyRequest,
-            srv_name='disable_robot',
-            callback=self.disable_robot,
-            callback_group=cb
+            EmptyRequest, 'disable_robot',
+            self._disable_robot, callback_group=cb
         )
-
-        # Enable Robot
         node.create_service(
-            srv_type=EnableRobot,
-            srv_name='enable_robot',
-            callback=self._enable_robot,
-            callback_group=cb
+            EnableRobot, 'enable_robot',
+            self._enable_robot, callback_group=cb
         )
-
-        # RequestControl
         node.create_service(
-            srv_type=EmptyRequest,
-            srv_name='request_control',
-            callback=self._request_control,
-            callback_group=cb
+            EmptyRequest, 'request_control',
+            self._request_control, callback_group=cb
         )
-
-        # Stop
         node.create_service(
-            srv_type=EmptyRequest,
-            srv_name='stop',
-            callback=self._stop,
-            callback_group=cb
+            EmptyRequest, 'stop',
+            self._stop, callback_group=cb
         )
-
-        # Pause
         node.create_service(
-            srv_type=EmptyRequest,
-            srv_name='pause',
-            callback=self._pause,
-            callback_group=cb
+            EmptyRequest, 'pause',
+            self._pause, callback_group=cb
         )
-
-        # Continue
         node.create_service(
-            srv_type=EmptyRequest,
-            srv_name='continue',
-            callback=self._continue,
-            callback_group=cb
+            EmptyRequest, 'continue',
+            self._continue, callback_group=cb
         )
-
-        # E-Stop Enable
         node.create_service(
-            srv_type=EmptyRequest,
-            srv_name='e_stop/activate',
-            callback=partial(self._estop, en=True),
-            callback_group=cb
+            EmptyRequest, 'e_stop/activate',
+            partial(self._estop, en=True), callback_group=cb
         )
-
-        # E-Stop Release
         node.create_service(
-            srv_type=EmptyRequest,
-            srv_name='e_stop/release',
-            callback=partial(self._estop, en=False),
-            callback_group=cb
+            EmptyRequest, 'e_stop/release',
+            partial(self._estop, en=False), callback_group=cb
         )
-
-        # Drag Enable
         node.create_service(
-            srv_type=EmptyRequest,
-            srv_name='drag/enable',
-            callback=partial(self._drag, en=True),
-            callback_group=cb
+            EmptyRequest, 'drag/enable',
+            partial(self._drag, en=True), callback_group=cb
         )
-
-        # Drag Release
         node.create_service(
-            srv_type=EmptyRequest,
-            srv_name='drag/disable',
-            callback=partial(self._drag, en=False),
-            callback_group=cb
+            EmptyRequest, 'drag/disable',
+            partial(self._drag, en=False), callback_group=cb
         )
-
-        self._log.info('Control Services are started.')
 
         self._dashboard: DobotDashboardClient = DobotDashboardClient()
+        self._log.info('Control services started.')
 
-    def _clear_error(self, _: EReq_req, response: EReq_Resp) -> EReq_Resp:
-        resp: Optional[DobotDashboardModel] = None
+    # ── Generic helper ────────────────────────────────────────────
 
+    def _execute(
+            self,
+            response: EReq_Resp,
+            cmd: str,
+            success_msg: str,
+            fail_msg: str
+    ) -> EReq_Resp:
+        """
+        Execute a dashboard command and populate the response.
+
+        Handles socket exceptions and maps success/failure to
+        the response fields. All simple service handlers delegate
+        to this method to avoid repetition.
+
+        Parameters
+        ----------
+        response : EReq_Resp
+            ROS2 service response to populate.
+        cmd : str
+            Dashboard command string to send.
+        success_msg : str
+            Message to set on success.
+        fail_msg : str
+            Prefix message to set on failure.
+
+        Returns
+        -------
+        EReq_Resp
+            Populated response object.
+
+        """
         try:
-            resp = self._dashboard.send_command(
-                cmd='ClearError()')
-
-        except Exception as e:
-            response.message = f'Socket exception occurred: {e}'
-            response.success = False
-            return response
-
-        if resp.is_success:
-            response.message = 'Successfully cleared error'
-            response.success = True
-        else:
-            response.message = 'Failed to clear the error. ' + \
-                f'Error Id: {resp.error_id}' + f'message: {resp.raw}'
-            response.success = False
-
-        return response
-
-    def disable_robot(self, _: EReq_req, response: EReq_Resp) -> EReq_Resp:
-        resp: Optional[DobotDashboardModel] = None
-
-        try:
-            resp = self._dashboard.send_command(
-                cmd='DisableRobot()')
-
-        except Exception as e:
-            response.message = f'Socket exception occurred: {e}'
-            response.success = False
-            return response
-
-        if resp.is_success:
-            response.message = 'Robot Disabled'
-            response.success = True
-        else:
-            response.message = 'Failed to disable the robot. ' + \
-                f'Error Id: {resp.error_id}' + f'message: {resp.raw}'
-            response.success = False
-
-        return response
-
-    def _enable_robot(self, request: ER_req, response: ER_resp) -> ER_resp:
-        _x: float = request.x_offset
-        _y: float = request.y_offset
-        _z: float = request.z_offset
-
-        _load: float = request.load
-        _cmd: str = f'EnableRobot({_load},{_x},{_y},{_z})'
-
-        if request.verify:
-            _cmd = f'EnableRobot({_load},{_x},{_y},{_z},1)'
-
-        resp: Optional[DobotDashboardModel] = None
-        try:
-            resp = self._dashboard.send_command(cmd=_cmd)
-
-        except Exception as e:
-            response.message = f'Socket exception occurred: {e}'
-            response.success = False
-            return response
-
-        if resp.is_success:
-            response.message = 'Robot Enabled'
-            response.success = True
-        else:
-            response.message = (
-                f'Failed to enable the robot. Error Id: {resp.error_id}'
-                + f'message: {resp.raw}'
+            resp: DobotDashboardModel = self._dashboard.send_command(
+                cmd=cmd
             )
-            response.success = False
-
-        return response
-
-    def _request_control(self, _: EReq_req, response: EReq_Resp) -> EReq_Resp:
-
-        resp: Optional[DobotDashboardModel] = None
-        try:
-            resp = self._dashboard.send_command(
-                cmd='RequestControl()')
-
-        except Exception as e:
-            response.message = f'Socket exception occurred: {e}'
-            response.success = False
-            return response
-
-        if resp.is_success:
-            response.message = 'Robot switched to TCP'
-            response.success = True
-        else:
-            response.message = 'Unable to switch robot to TCP. ' + \
-                f'Error Id: {resp.error_id}' + f'message: {resp.raw}'
-            response.success = False
-
-        return response
-
-    def _stop(self, _: EReq_req, response: EReq_Resp) -> EReq_Resp:
-        resp: Optional[DobotDashboardModel] = None
-
-        try:
-            resp = self._dashboard.send_command(
-                cmd='Stop()')
-
-        except Exception as e:
-            response.message = f'Socket exception occurred: {e}'
-            response.success = False
-            return response
-
-        if resp.is_success:
-            response.message = 'Stopped the execution'
-            response.success = True
-        else:
-            response.message = 'Unable to stop the execution.' + \
-                f'Error Id: {resp.error_id}' + f'message: {resp.raw}'
-            response.success = False
-
-        return response
-
-    def _pause(self, _: EReq_req, response: EReq_Resp) -> EReq_Resp:
-        resp: Optional[DobotDashboardModel] = None
-
-        try:
-            resp = self._dashboard.send_command(
-                cmd='Pause()')
-
-        except Exception as e:
-            response.message = f'Socket exception occurred: {e}'
-            response.success = False
-            return response
-
-        if resp.is_success:
-            response.message = 'Paused the execution'
-            response.success = True
-        else:
-            response.message = 'Unable to pause the execution.' + \
-                f'Error Id: {resp.error_id}' + f'message: {resp.raw}'
-            response.success = False
-
-        return response
-
-    def _continue(self, _: EReq_req, response: EReq_Resp) -> EReq_Resp:
-        resp: Optional[DobotDashboardModel] = None
-
-        try:
-            resp = self._dashboard.send_command(
-                cmd='ClearError()')
-
-        except Exception as e:
-            response.message = f'Socket exception occurred: {e}'
-            response.success = False
-            return response
-
-        if resp.is_success:
-            response.message = 'Continuing the execution'
-            response.success = True
-        else:
-            response.message = 'Unable to continuing the execution. ' + \
-                f'Error Id: {resp.error_id}' + f'message: {resp.raw}'
-            response.success = False
-
-        return response
-
-    def _estop(self, _: EReq_req, response: EReq_Resp, en: bool) -> EReq_Resp:
-        resp: Optional[DobotDashboardModel] = None
-
-        try:
-            resp = self._dashboard.send_command(
-                cmd=f'EmergencyStop({int(en)})')
-
-        except Exception as e:
-            response.message = f'Socket exception occurred: {e}'
-            response.success = False
-            return response
-
-        if resp.is_success:
-            msg: str = 'Activating' if en else 'Deactivating'
-            response.message = f'{msg} the E-Stop'
-            response.success = True
-        else:
-            msg: str = 'Activate' if en else 'Deactivate'
-            response.message = f'Unable to {msg} E-Stop. ' + \
-                f'Error Id: {resp.error_id}' + f'message: {resp.raw}'
-            response.success = False
-
-        return response
-
-    def _drag(self, _: EReq_req, response: EReq_Resp, en: bool) -> EReq_Resp:
-        _cmd: str = 'StartDrag()' if en else 'StopDrag()'
-        resp: Optional[DobotDashboardModel] = None
-        try:
-            resp = self._dashboard.send_command(cmd=_cmd)
-
-        except Exception as e:
-            response.message = f'Socket exception occurred: {e}'
-            response.success = False
-            return response
-
-        if resp.is_success:
-            msg: str = 'Entering' if en else 'Exiting'
-            response.message = f'{msg} the drag mode'
-            response.success = True
-        else:
-            msg = 'Enter' if en else 'Exit'
-            response.message = (
-                f'Unable to {msg} the Drag. Error Id: {resp.error_id}'
-                + f'message: {resp.raw}'
+            response.success = resp.is_success
+            response.message = success_msg if resp.is_success else (
+                f'{fail_msg} Error {resp.error_id}: {resp.raw}'
             )
+        except Exception as e:
             response.success = False
-
+            response.message = f'Socket exception: {e}'
         return response
+
+    # ── Service handlers ──────────────────────────────────────────
+
+    def _clear_error(
+            self, _: EReq_req, response: EReq_Resp
+    ) -> EReq_Resp:
+        """Handle clear_error service -- clear robot error state."""
+        return self._execute(
+            response,
+            cmd='ClearError()',
+            success_msg='Error cleared successfully.',
+            fail_msg='Failed to clear error.'
+        )
+
+    def _disable_robot(
+            self, _: EReq_req,
+            response: EReq_Resp) -> EReq_Resp:
+        """Handle disable_robot service -- disable the robot arm."""
+        return self._execute(
+            response,
+            cmd='DisableRobot()',
+            success_msg='Robot disabled.',
+            fail_msg='Failed to disable robot.'
+        )
+
+    def _enable_robot(
+            self, request: ER_req,
+            response: ER_resp) -> ER_resp:
+        """
+        Handle enable_robot service -- enable arm with optional load.
+
+        Parameters
+        ----------
+        request : ER_req
+            Request containing load, x/y/z offsets and verify flag.
+        response : ER_resp
+            Service response to populate.
+
+        Returns
+        -------
+        ER_resp
+            Populated response object.
+
+        """
+        cmd: str = (
+            f'EnableRobot({request.load},'
+            f'{request.x_offset},{request.y_offset},{request.z_offset}'
+            f'{",1" if request.verify else ""})'
+        )
+        try:
+            resp: DobotDashboardModel = self._dashboard.send_command(
+                cmd=cmd
+            )
+            response.success = resp.is_success
+            response.message = 'Robot enabled.' if resp.is_success else (
+                f'Failed to enable robot. Error {resp.error_id}: {resp.raw}'
+            )
+        except Exception as e:
+            response.success = False
+            response.message = f'Socket exception: {e}'
+        return response
+
+    def _request_control(
+            self, _: EReq_req,
+            response: EReq_Resp) -> EReq_Resp:
+        """Handle request_control service -- switch to TCP mode."""
+        return self._execute(
+            response,
+            cmd='RequestControl()',
+            success_msg='Robot switched to TCP mode.',
+            fail_msg='Failed to switch to TCP mode.'
+        )
+
+    def _stop(
+            self, _: EReq_req,
+            response: EReq_Resp) -> EReq_Resp:
+        """Handle stop service -- stop current execution."""
+        return self._execute(
+            response,
+            cmd='Stop()',
+            success_msg='Execution stopped.',
+            fail_msg='Failed to stop execution.'
+        )
+
+    def _pause(
+            self, _: EReq_req,
+            response: EReq_Resp) -> EReq_Resp:
+        """Handle pause service -- pause current execution."""
+        return self._execute(
+            response,
+            cmd='Pause()',
+            success_msg='Execution paused.',
+            fail_msg='Failed to pause execution.'
+        )
+
+    def _continue(
+            self, _: EReq_req,
+            response: EReq_Resp) -> EReq_Resp:
+        """Handle continue service -- resume paused execution."""
+        return self._execute(
+            response,
+            cmd='Continue()',
+            success_msg='Execution resumed.',
+            fail_msg='Failed to resume execution.'
+        )
+
+    def _estop(
+            self, _: EReq_req,
+            response: EReq_Resp, en: bool) -> EReq_Resp:
+        """
+        Handle e_stop services -- activate or release emergency stop.
+
+        Parameters
+        ----------
+        _ : EReq_req
+            Unused request.
+        response : EReq_Resp
+            Service response to populate.
+        en : bool
+            True to activate, False to release.
+
+        Returns
+        -------
+        EReq_Resp
+            Populated response object.
+
+        """
+        action: str = 'Activating' if en else 'Releasing'
+        fail_action: str = 'activate' if en else 'release'
+        return self._execute(
+            response,
+            cmd=f'EmergencyStop({int(en)})',
+            success_msg=f'{action} emergency stop.',
+            fail_msg=f'Failed to {fail_action} emergency stop.'
+        )
+
+    def _drag(
+            self, _: EReq_req,
+            response: EReq_Resp, en: bool) -> EReq_Resp:
+        """
+        Handle drag services -- enter or exit drag mode.
+
+        Parameters
+        ----------
+        _ : EReq_req
+            Unused request.
+        response : EReq_Resp
+            Service response to populate.
+        en : bool
+            True to enter drag mode, False to exit.
+
+        Returns
+        -------
+        EReq_Resp
+            Populated response object.
+
+        """
+        action: str = 'Entering' if en else 'Exiting'
+        fail_action: str = 'enter' if en else 'exit'
+        return self._execute(
+            response,
+            cmd='StartDrag()' if en else 'StopDrag()',
+            success_msg=f'{action} drag mode.',
+            fail_msg=f'Failed to {fail_action} drag mode.'
+        )

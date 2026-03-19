@@ -5,9 +5,11 @@ Single responsibility: orchestrate all driver components.
 Wires together publishers, services, feedback and mock mode.
 Does not contain any robot logic itself.
 
-Parameters:
+Parameters
+----------
     robot_ip  (string, default: '192.168.5.1')
     mock_mode (bool,   default: false)
+
 """
 
 
@@ -18,8 +20,7 @@ from cr5_driver.publishers.robot_state_publisher import RobotStatePublisher
 from cr5_driver.services import ControlService, SettingsService
 from cr5_driver.tcp import (
     DobotDashboardClient,
-    DobotFeedbackClient,
-    get_feedback_client
+    DobotFeedbackClient
 )
 
 
@@ -59,7 +60,7 @@ class DriverNode(Node):
 
         # 4. TCP Clients
         # Feedback Clients
-        self._feedback: DobotFeedbackClient = get_feedback_client(
+        self._feedback: DobotFeedbackClient = DobotFeedbackClient(
             host=_robot_ip, log=self.get_logger())
 
         self._feedback.register_callback(callbacks=self._joint_pub.publish)

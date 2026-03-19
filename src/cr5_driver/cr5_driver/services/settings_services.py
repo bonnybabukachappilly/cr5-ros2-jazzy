@@ -1,152 +1,233 @@
+"""
+SettingsService -- ROS2 service handlers for CR5 robot settings.
 
-from typing import Optional
+Registers and handles all settings-related ROS2 services that
+map directly to Dobot dashboard commands on port 29999.
+
+Services registered:
+    set_speed         -- Set global speed factor (1-100%)
+    set_payload       -- Set robot payload and centre of mass
+    set_motion_params -- Set motion parameters (AccJ/AccL/VelJ/VelL/CP)
+"""
+
+from typing import Any
+
 
 from cr5_driver.robot.dashboard_model import DobotDashboardModel
-from cr5_msgs.srv import (
-    SetSpeed, SetPayload, SetMotionParams
-)
-
-from cr5_msgs.srv._set_speed import (
-    SetSpeed_Request as SS_req, SetSpeed_Response as SS_resp
-)
-from cr5_msgs.srv._set_payload import (
-    SetPayload_Request as SP_req, SetPayload_Response as SP_resp
-)
-from cr5_msgs.srv._set_motion_params import (
-    SetMotionParams_Request as SM_req, SetMotionParams_Response as SM_resp
-)
-
 from cr5_driver.tcp import DobotDashboardClient
 
+from cr5_msgs.srv import SetMotionParams, SetPayload, SetSpeed
+from cr5_msgs.srv._set_motion_params import (
+    SetMotionParams_Request as SM_req,
+    SetMotionParams_Response as SM_resp,
+)
+from cr5_msgs.srv._set_payload import (
+    SetPayload_Request as SP_req,
+    SetPayload_Response as SP_resp,
+)
+from cr5_msgs.srv._set_speed import (
+    SetSpeed_Request as SS_req,
+    SetSpeed_Response as SS_resp,
+)
+
+from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.impl.rcutils_logger import RcutilsLogger
 from rclpy.node import Node
-from rclpy.callback_groups import ReentrantCallbackGroup
+
+VALID_MOTION_PARAMS: frozenset[str] = frozenset(
+    {'AccJ', 'AccL', 'VelJ', 'VelL', 'CP'})
 
 
 class SettingsService:
-    def __init__(self, node: Node) -> None:
-        self._log: RcutilsLogger = node.get_logger()
+    """
+    ROS2 service handlers for CR5 robot settings commands.
 
-        self._log.info('Starting control services...')
+    All services delegate to DobotDashboardClient which manages
+    the TCP connection to port 29999. Uses ReentrantCallbackGroup
+    to allow concurrent service execution.
+    """
+
+    def __init__(self, node: Node) -> None:
+        """
+        Initialise and register all settings services on the node.
+
+        Parameters
+        ----------
+        node : Node
+            ROS2 node to register services on.
+
+        """
+        self._log: RcutilsLogger = node.get_logger()
+        self._log.info('Starting settings services...')
 
         cb = ReentrantCallbackGroup()
 
-        # Set Speed
         node.create_service(
-            srv_type=SetSpeed,
-            srv_name='set_speed',
-            callback=self._set_speed,
-            callback_group=cb
+            SetSpeed, 'set_speed',
+            self._set_speed, callback_group=cb
         )
-
-        # Set Payload
         node.create_service(
-            srv_type=SetPayload,
-            srv_name='set_payload',
-            callback=self._set_payload,
-            callback_group=cb
+            SetPayload, 'set_payload',
+            self._set_payload, callback_group=cb
         )
-
-        # Motion Parameters
         node.create_service(
-            srv_type=SetMotionParams,
-            srv_name='set_motion_params',
-            callback=self._set_motion_param,
-            callback_group=cb
+            SetMotionParams, 'set_motion_params',
+            self._set_motion_params, callback_group=cb
         )
-
-        self._log.info('Settings Services are started.')
 
         self._dashboard: DobotDashboardClient = DobotDashboardClient()
+        self._log.info('Settings services started.')
 
-    def _set_speed(self, request: SS_req, response: SS_resp) -> SS_resp:
-        # sourcery skip: class-extract-method
+    # ── Generic helper ────────────────────────────────────────────
+
+    def _execute(
+            self,
+            response: SS_resp | SP_resp | SM_resp,
+            cmd: str,
+            success_msg: str,
+            fail_msg: str
+    ) -> Any:
+        """
+        Execute a dashboard command and populate the response.
+
+        Parameters
+        ----------
+        response : SS_resp
+            ROS2 service response to populate.
+        cmd : str
+            Dashboard command string to send.
+        success_msg : str
+            Message to set on success.
+        fail_msg : str
+            Prefix message to set on failure.
+
+        Returns
+        -------
+        Any
+            Populated response object.
+
+        """
+        try:
+            resp: DobotDashboardModel = self._dashboard.send_command(
+                cmd=cmd
+            )
+            response.success = resp.is_success
+            response.message = success_msg if resp.is_success else (
+                f'{fail_msg} Error {resp.error_id}: {resp.raw}'
+            )
+        except Exception as e:
+            response.success = False
+            response.message = f'Socket exception: {e}'
+        return response
+
+    # ── Service handlers ──────────────────────────────────────────
+
+    def _set_speed(
+            self, request: SS_req, response: SS_resp
+    ) -> SS_resp:
+        """
+        Handle set_speed service -- set global speed factor.
+
+        Parameters
+        ----------
+        request : SS_req
+            Request containing speed_percent (1-100).
+        response : SS_resp
+            Service response to populate.
+
+        Returns
+        -------
+        SS_resp
+            Populated response object.
+
+        """
         ratio: int = request.speed_percent
 
-        resp: Optional[DobotDashboardModel] = None
-        try:
-            if 0 < ratio <= 100:
-                raise ValueError('Should be between 1 - 100')
-            resp = self._dashboard.send_command(cmd=f'SpeedFactor({ratio})')
-
-        except Exception as e:
-            response.message = f'Socket exception occurred: {e}'
+        if not (1 <= ratio <= 100):
             response.success = False
+            response.message = (
+                f'Invalid speed: {ratio}. Must be between 1 and 100.'
+            )
             return response
 
-        if resp.is_success:
-            response.message = f'Speed set to: {ratio}'
-            response.success = True
-        else:
-            response.message = (
-                f'Failed to set the robot speed. Error Id: {resp.error_id}'
-                + f'message: {resp.raw}'
-            )
-            response.success = False
+        return self._execute(
+            response,
+            cmd=f'SpeedFactor({ratio})',
+            success_msg=f'Speed set to {ratio}%.',
+            fail_msg='Failed to set speed.'
+        )
 
-        return response
+    def _set_payload(
+            self, request: SP_req, response: SP_resp
+    ) -> SP_resp:
+        """
+        Handle set_payload service -- set payload and centre of mass.
 
-    def _set_payload(self, request: SP_req, response: SP_resp) -> SP_resp:
-        load: float = request.load
-        _x: float = request.x_offset
-        _y: float = request.y_offset
-        _z: float = request.z_offset
+        Parameters
+        ----------
+        request : SP_req
+            Request containing load (kg) and x/y/z offsets (mm).
+        response : SP_resp
+            Service response to populate.
 
-        resp: Optional[DobotDashboardModel] = None
-        try:
-            resp = self._dashboard.send_command(
-                cmd=f'SetPayload({load},{_x},{_y},{_z})')
+        Returns
+        -------
+        SP_resp
+            Populated response object.
 
-        except Exception as e:
-            response.message = f'Socket exception occurred: {e}'
-            response.success = False
-            return response
+        """
+        return self._execute(
+            response,
+            cmd=(
+                f'SetPayload({request.load},'
+                f'{request.x_offset},{request.y_offset},{request.z_offset})'
+            ),
+            success_msg=f'Payload set to {request.load}kg.',
+            fail_msg='Failed to set payload.'
+        )
 
-        if resp.is_success:
-            response.message = f'Payload set to: {load}'
-            response.success = True
-        else:
-            response.message = (
-                f'Failed to set the robot payload. Error Id: {resp.error_id}'
-                + f'message: {resp.raw}'
-            )
-            response.success = False
+    def _set_motion_params(
+            self, request: SM_req, response: SM_resp
+    ) -> SM_resp:
+        """
+        Handle set_motion_params service -- set motion parameter.
 
-        return response
+        Valid parameters: AccJ, AccL, VelJ, VelL, CP.
 
-    def _set_motion_param(self, request: SM_req, response: SM_resp) -> SM_resp:
-        ratio: int = request.percent
+        Parameters
+        ----------
+        request : SM_req
+            Request containing param name and percent value (1-100).
+        response : SM_resp
+            Service response to populate.
+
+        Returns
+        -------
+        SM_resp
+            Populated response object.
+
+        """
         param: str = request.param
+        ratio: int = request.percent
 
-        resp: Optional[DobotDashboardModel] = None
-        try:
-            match param:
-                case 'AccJ':
-                    resp = self._dashboard.send_command(cmd=f'AccJ({ratio})')
-                case 'AccL':
-                    resp = self._dashboard.send_command(cmd=f'AccL({ratio})')
-                case 'VelJ':
-                    resp = self._dashboard.send_command(cmd=f'VelJ({ratio})')
-                case 'VelL':
-                    resp = self._dashboard.send_command(cmd=f'VelL({ratio})')
-                case 'CP':
-                    resp = self._dashboard.send_command(cmd=f'CP({ratio})')
-                case _:
-                    raise ValueError('Parameter do not match')
-
-        except Exception as e:
-            response.message = f'Socket exception occurred: {e}'
+        if param not in VALID_MOTION_PARAMS:
             response.success = False
+            response.message = (
+                f'Invalid parameter: {param}. '
+                f'Valid options: {sorted(VALID_MOTION_PARAMS)}'
+            )
             return response
 
-        if resp.is_success:
-            response.message = f'Speed set to: {ratio}'
-            response.success = True
-        else:
-            response.message = (
-                f'Failed to set the robot speed. Error Id: {resp.error_id}'
-                + f'message: {resp.raw}'
-            )
+        if not (1 <= ratio <= 100):
             response.success = False
+            response.message = (
+                f'Invalid value: {ratio}. Must be between 1 and 100.'
+            )
+            return response
 
-        return response
+        return self._execute(
+            response,
+            cmd=f'{param}({ratio})',
+            success_msg=f'{param} set to {ratio}%.',
+            fail_msg=f'Failed to set {param}.'
+        )

@@ -14,9 +14,8 @@ Usage:
 from __future__ import annotations
 
 import contextlib
-import threading
-from functools import lru_cache
 from socket import AF_INET, SHUT_RDWR, SOCK_STREAM, socket
+import threading
 from threading import Lock
 from typing import Optional, Self
 
@@ -126,9 +125,7 @@ class DobotDashboardClient:
         self._log.info('Dashboard connection closed')
 
     def send_command(self, cmd: str) -> DobotDashboardModel:
-        """
-        Send a dashboard command with automatic reconnection on failure.
-        """
+        """Send a dashboard command with automatic reconnection on failure."""
         if not cmd.endswith('\n'):
             cmd += '\n'
 
@@ -151,10 +148,10 @@ class DobotDashboardClient:
                     self._log.error(
                         f'Auto-reconnect failed for [{cmd.strip()}]: {retry_error}')
                     raise ConnectionError(
-                        f"Robot unreachable after reconnect: {retry_error}") from retry_error
+                        f'Robot unreachable after reconnect: {retry_error}') from retry_error
 
     def _execute_transaction(self, cmd: str) -> DobotDashboardModel:
-        """Internal helper to handle the raw send/recv logic."""
+        """Handle the raw send/recv logic."""
         if not self._socket:
             raise ConnectionError('Dashboard socket is not connected.')
 

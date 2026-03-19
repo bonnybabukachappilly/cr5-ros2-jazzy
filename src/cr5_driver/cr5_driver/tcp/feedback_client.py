@@ -14,11 +14,10 @@ Usage:
 """
 
 import contextlib
-import struct
-from functools import lru_cache
 from socket import AF_INET, SHUT_RDWR, SOCK_STREAM, socket, timeout
+import struct
 import time
-from typing import Callable, Optional
+from typing import Callable, Optional, Self
 
 from cr5_driver.robot.feedback_model import DobotFeedbackModel
 
@@ -36,7 +35,10 @@ class DobotFeedbackClient:
 
     Extend by overriding the hook methods:
         _on_connect, _on_disconnect, _on_error, _on_message
+
     """
+
+    _instance: Optional[Self] = None
 
     __slots__ = (
         '_host', '_port', '_buffer_size',
@@ -45,25 +47,47 @@ class DobotFeedbackClient:
         '_watchdog_threshold'
     )
 
+    def __new__(cls, host: Optional[str] = None,
+                log: Optional[RcutilsLogger] = None,
+                port: int = 29999) -> Self:
+
+        if cls._instance is None:
+            if host is None or log is None:
+                raise RuntimeError(
+                    "Missing 2 required positional arguments: 'host' and 'log'"
+                )
+
+            cls._instance = super().__new__(cls)
+
+        return cls._instance
+
     def __init__(
             self,
-            host: str,
-            port: int,
-            log: RcutilsLogger,
+            host: Optional[str] = None,
+            log: Optional[RcutilsLogger] = None,
+            port: int = 29999,
             buffer_size: int = 1440) -> None:
         """
         Initialise the feedback client.
 
         Parameters
         ----------
-        host : str
+        host : Optional[str]
             IP address of the CR5 controller.
+        log : Optional[RcutilsLogger]
+            ROS2 node logger for info and error messages.
         port : int
-            Feedback port number.
+            Feedback port number. Default 30004.
         buffer_size : int
             Expected packet size in bytes. Default 1440.
 
         """
+        if hasattr(self, '_host') and hasattr(self, '_log'):
+            return
+
+        assert host is not None
+        assert log is not None
+
         self._host: str = host
         self._port: int = port
         self._log: RcutilsLogger = log
@@ -104,7 +128,7 @@ class DobotFeedbackClient:
 
         Parameters
         ----------
-        callback : Callable[[DobotFeedbackModel], None]
+        callbacks : Callable[[DobotFeedbackModel], None]
             Function called with parsed feedback on each packet.
             Duplicate registrations are ignored.
 
@@ -196,9 +220,9 @@ class DobotFeedbackClient:
         assert self._socket is not None
         self._on_connect((self._host, self._port))
 
-        stream_buffer = bytearray()
         self._last_valid_packet_time = time.monotonic()
 
+        stream_buffer = bytearray()
         try:
             while self._is_running:
                 time_since_last: float = (
@@ -206,8 +230,9 @@ class DobotFeedbackClient:
 
                 if time_since_last > self._watchdog_threshold:
                     self._log.error(
-                        'Watchdog Triggered: No valid data for ' +
-                        f'{time_since_last:.3f}s')
+                        'Watchdog Triggered: No valid data for' +
+                        f' {time_since_last:.3f}s'
+                    )
 
                     self._last_valid_packet_time = time.monotonic()
                 try:
@@ -317,34 +342,3 @@ class DobotFeedbackClient:
 
         """
         self._log.info(f'[STATE] Session ended with {addr}')
-
-
-@lru_cache(maxsize=1)
-def get_feedback_client(
-        host: Optional[str] = None,
-        log: Optional[RcutilsLogger] = None,
-        port: int = 30004) -> DobotFeedbackClient:
-    """
-    Get or create the shared feedback client instance.
-
-    Uses lru_cache to ensure only one instance exists per
-    (host, port) combination. The instance is created on the
-    first call and returned from cache on all subsequent calls.
-
-    To reset the instance (e.g. in tests), call:
-        get_feedback_client.cache_clear()
-
-    Parameters
-    ----------
-    host : str
-        IP address of the CR5 controller.
-    port : int
-        Feedback port number. Default 30004.
-
-    Returns
-    -------
-    DobotFeedbackClient
-        The single shared instance for this host and port.
-
-    """
-    return DobotFeedbackClient(host, port, log)
