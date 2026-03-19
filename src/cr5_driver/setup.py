@@ -25,6 +25,8 @@ setup(
         ],
     },
     entry_points={
-        'console_scripts': [],
+        'console_scripts': [
+            'driver_node = cr5_driver.driver_node:main',
+        ],
     },
 )

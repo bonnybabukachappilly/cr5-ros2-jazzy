@@ -1,202 +1,344 @@
 """
-FeedbackClient -- TCP connection to Dobot CR5 port 30004.
+DobotFeedbackClient -- TCP client for CR5 real-time feedback port.
 
-Reads 1440-byte state packets pushed by the robot every 8ms.
-Handles TCP stream fragmentation and packet boundary sync.
+Connects to port 30004 and continuously receives 1440-byte state
+packets pushed by the robot every 8ms. Stores the latest parsed
+packet as a property for consumers to read at their own rate.
+
+Usage:
+    # First call -- initialise with robot IP
+    get_feedback_client('192.168.0.141').start()
+
+    # Anywhere else -- get cached instance and read latest data
+    fb = get_feedback_client('192.168.0.141').message
 """
 
-
 import contextlib
-import logging
-import socket
+from socket import AF_INET, SHUT_RDWR, SOCK_STREAM, socket, timeout
 import struct
-import threading
 import time
-from typing import Callable, cast, Optional
+from typing import Callable, Optional, Self
+
+from cr5_driver.robot.feedback_model import DobotFeedbackModel
+
+from rclpy.impl.rcutils_logger import RcutilsLogger
 
 
-PACKET_SIZE = 1440
-MAGIC: bytes = struct.pack('<I', PACKET_SIZE)  # b'\xa0\x05\x00\x00'
-
-
-class FeedbackClient:
+class DobotFeedbackClient:
     """
     TCP client for CR5 real-time feedback port (30004).
 
-    Continuously reads 1440-byte packets at 125Hz in a background
-    thread and calls a user-supplied callback with each raw packet.
+    Receives 1440-byte packets continuously from the robot and
+    stores the latest parsed state as the `message` property.
+    Consumers read `message` at their own rate without coupling
+    to the feedback thread.
 
-    Handles:
-    - TCP stream fragmentation (recv may return partial packets)
-    - Packet boundary sync using magic header bytes
-    - Automatic reconnection on connection loss
+    Extend by overriding the hook methods:
+        _on_connect, _on_disconnect, _on_error, _on_message
+
     """
 
-    PORT = 30004
-    TIMEOUT = 5.0
-    RECONNECT_DELAY = 2.0
+    _instance: Optional[Self] = None
+
+    __slots__ = (
+        '_host', '_port', '_buffer_size',
+        '_socket', '_is_running', '_message',
+        '_callbacks', '_log', '_last_valid_packet_time',
+        '_watchdog_threshold'
+    )
+
+    def __new__(cls, host: Optional[str] = None,
+                log: Optional[RcutilsLogger] = None,
+                port: int = 29999) -> Self:
+
+        if cls._instance is None:
+            if host is None or log is None:
+                raise RuntimeError(
+                    "Missing 2 required positional arguments: 'host' and 'log'"
+                )
+
+            cls._instance = super().__new__(cls)
+
+        return cls._instance
 
     def __init__(
-            self, robot_ip: str, callback: Callable[[bytes], None]) -> None:
+            self,
+            host: Optional[str] = None,
+            log: Optional[RcutilsLogger] = None,
+            port: int = 29999,
+            buffer_size: int = 1440) -> None:
         """
-        Initialise feedback client.
+        Initialise the feedback client.
 
         Parameters
         ----------
-        robot_ip : str
+        host : Optional[str]
             IP address of the CR5 controller.
-        callback : Callable[[bytes], None]
-            Function called with each clean 1440-byte packet.
+        log : Optional[RcutilsLogger]
+            ROS2 node logger for info and error messages.
+        port : int
+            Feedback port number. Default 30004.
+        buffer_size : int
+            Expected packet size in bytes. Default 1440.
 
         """
-        self.robot_ip: str = robot_ip
-        self.callback: Callable[[bytes], None] = callback
-        self.sock: Optional[socket.socket] = None
-        self.logger: logging.Logger = logging.getLogger(__name__)
-        self._buffer: bytearray = bytearray()
-        self._running: bool = False
-        self._thread: Optional[threading.Thread] = None
+        if hasattr(self, '_host') and hasattr(self, '_log'):
+            return
 
-    def start(self) -> None:
-        """Start the feedback reader thread."""
-        self._running = True
-        self._thread = threading.Thread(
-            target=self._run_loop, name='cr5_feedback', daemon=True
-        )
-        self._thread.start()
-        self.logger.info('Feedback client started')
+        assert host is not None
+        assert log is not None
 
-    def stop(self) -> None:
-        """Stop the feedback reader thread."""
-        self._running = False
-        self._disconnect()
-        if self._thread:
-            self._thread.join(timeout=3.0)
-        self.logger.info('Feedback client stopped')
+        self._host: str = host
+        self._port: int = port
+        self._log: RcutilsLogger = log
+        self._buffer_size: int = buffer_size
+        self._socket: Optional[socket] = None
+        self._is_running: bool = False
+        self._message: Optional[DobotFeedbackModel] = None
+        self._callbacks: list[Callable[[DobotFeedbackModel], None]] = []
+        self._last_valid_packet_time: float = time.monotonic()
+        self._watchdog_threshold = 0.1
 
-    def _run_loop(self) -> None:
+    @property
+    def message(self) -> Optional[DobotFeedbackModel]:
         """
-        Run main feedback loop run in background thread.
+        Return the most recently received feedback packet.
 
-        Connects, syncs to packet boundary, then continuously
-        reads packets and calls the callback. Reconnects on error.
-        """
-        while self._running:
-            try:
-                self._connect()
-                self._sync_to_packet_boundary()
-                self.logger.info('Synced to packet boundary -- reading')
-
-                while self._running:
-                    raw: bytes = self._read_exact(PACKET_SIZE)
-                    self.callback(raw)
-
-            except (ConnectionError, OSError, socket.timeout) as e:
-                if self._running:
-                    self.logger.warning(
-                        f'Feedback connection lost: {e}. '
-                        f'Reconnecting in {self.RECONNECT_DELAY}s...'
-                    )
-                    self._disconnect()
-                    self._buffer.clear()
-
-                    time.sleep(self.RECONNECT_DELAY)
-
-    def _connect(self) -> None:
-        """
-        Open TCP connection to feedback port.
-
-        Raises
-        ------
-        ConnectionError
-            If connection cannot be established.
-
-        """
-        self.logger.info(f'Connecting to {self.robot_ip}:{self.PORT}')
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.settimeout(self.TIMEOUT)
-        self.sock.connect((self.robot_ip, self.PORT))
-        self.logger.info('Connected to feedback port')
-
-    def _disconnect(self) -> None:
-        """Close the feedback connection."""
-        if self.sock:
-            with contextlib.suppress(OSError):
-                self.sock.close()
-            self.sock = None
-
-    def _read_exact(self, n: int) -> bytes:
-        """
-        Block until exactly n bytes are in the buffer.
-
-        Accumulates recv() calls until enough bytes arrive.
-        Never assumes one recv() equals one packet.
-
-        Parameters
-        ----------
-        n : int
-            Exact number of bytes to read.
+        Returns None if no packet has been received yet.
 
         Returns
         -------
-        bytes
-            Exactly n bytes consumed from the buffer.
+        Optional[DobotFeedbackModel]
+            Latest parsed robot state, or None.
+
+        """
+        return self._message
+
+    @property
+    def is_healthy(self) -> bool:
+        """Check socket is healthy."""
+        return (
+            time.monotonic() - self._last_valid_packet_time
+        ) < self._watchdog_threshold
+
+    def register_callback(
+            self, callbacks: Callable[[DobotFeedbackModel], None]) -> None:
+        """
+        Register a callback to be called on every new message.
+
+        Parameters
+        ----------
+        callbacks : Callable[[DobotFeedbackModel], None]
+            Function called with parsed feedback on each packet.
+            Duplicate registrations are ignored.
+
+        """
+        if callbacks not in self._callbacks:
+            self._log.debug(f'New call back registered {callbacks}')
+            self._callbacks.append(callbacks)
+            return
+
+        self._log.warning(f'{callbacks} already registered. Ignoring for now.')
+
+    def start(self) -> None:
+        """
+        Connect to the robot and start receiving feedback.
+
+        Blocks until the connection is closed or an error occurs.
+        Call from a background thread to avoid blocking the caller.
+        """
+        try:
+            self._socket_connect()
+
+        except Exception as e:
+            self._on_error(f'Connection Failure: {e}')
+
+        finally:
+            self.stop()
+
+    def stop(self) -> None:
+        """
+        Stop receiving and close the connection.
+
+        Safe to call multiple times. Sets is_running to False
+        which causes the receive loop to exit cleanly.
+        """
+        self._log.info('Stopping dobot feedback socket')
+
+        self._is_running = False
+        if self._socket:
+            with contextlib.suppress(Exception):
+                self._socket.shutdown(SHUT_RDWR)
+                self._socket.close()
+            self._socket = None
+
+        self._log.info('Client disconnected.')
+
+    def _socket_connect(self) -> None:
+        """
+        Create socket, connect to robot, then start receive loop.
+
+        Sets a 5 second timeout for the initial connection and
+        a 1 second timeout for ongoing receives so the loop can
+        check is_running periodically.
 
         Raises
         ------
-        ConnectionError
-            If the robot closes the connection.
+        ConnectionRefusedError
+            If the robot is not reachable at host:port.
+        OSError
+            If the socket cannot be created or connected.
 
         """
-        sock: socket.socket = cast(socket.socket, self.sock)
-        while len(self._buffer) < n:
-            if chunk := sock.recv(4096):
-                self._buffer.extend(chunk)
+        self._log.info('Starting dobot feedback socket')
 
-            else:
-                raise ConnectionError('CR5 closed the feedback connection')
-        data = bytes(self._buffer[:n])
-        del self._buffer[:n]
-        return data
+        self._log.info(
+            f'Attempting to connect to Dobot at '
+            f'{self._host}:{self._port}...'
+        )
 
-    def _sync_to_packet_boundary(self) -> None:
+        self._socket = socket(AF_INET, SOCK_STREAM)
+        self._socket.settimeout(5.0)
+        self._socket.connect((self._host, self._port))
+        self._is_running = True
+
+        self._log.info(f'Connected to {self._host}')
+
+        # Reduce timeout for receive loop so is_running is checked
+        # at least once per second
+        self._socket.settimeout(1.0)
+        self._receive_loop()
+
+    def _receive_loop(self) -> None:
         """
-        Scan buffer until magic header is found at position 0.
+        Continuously receive 1440-byte packets from the robot.
 
-        Uses the 4-byte packet length header (0xa0050000) as a
-        sync word to align to packet boundaries after connect
-        or reconnect. Discards any bytes before the header.
+        Accumulates chunks until a full packet is received, then
+        calls _on_message. On recv timeout, checks is_running and
+        retries. Exits when is_running is False or connection drops.
+        """
+        assert self._socket is not None
+        self._on_connect((self._host, self._port))
+
+        self._last_valid_packet_time = time.monotonic()
+
+        stream_buffer = bytearray()
+        try:
+            while self._is_running:
+                time_since_last: float = (
+                    time.monotonic() - self._last_valid_packet_time)
+
+                if time_since_last > self._watchdog_threshold:
+                    self._log.error(
+                        'Watchdog Triggered: No valid data for' +
+                        f' {time_since_last:.3f}s'
+                    )
+
+                    self._last_valid_packet_time = time.monotonic()
+                try:
+                    chunk: bytes = self._socket.recv(4096)
+                    if not chunk:
+                        self._on_error('Robot closed the connection.')
+                        return
+                    stream_buffer.extend(chunk)
+                except timeout:
+                    continue
+
+                while len(stream_buffer) >= self._buffer_size:
+                    msg_size = struct.unpack_from('<H', stream_buffer, 0)[0]
+
+                    if msg_size == self._buffer_size:
+                        self._last_valid_packet_time = time.monotonic()
+                        if len(stream_buffer) >= (self._buffer_size * 2):
+                            del stream_buffer[:self._buffer_size]
+                            continue
+
+                        packet = bytes(stream_buffer[:self._buffer_size])
+                        self._last_valid_packet_time = time.monotonic()
+
+                        self._on_message(packet, (self._host, self._port))
+                        del stream_buffer[:self._buffer_size]
+                    else:
+                        next_header: int = stream_buffer.find(b'\xa0\x05', 1)
+                        if next_header == -1:
+                            del stream_buffer[:-1]
+                        else:
+                            del stream_buffer[:next_header]
+
+        except OSError as e:
+            if self._is_running:
+                self._on_error(f'Read Error: {e}')
+        finally:
+            self._on_disconnect((self._host, self._port))
+
+    def _on_message(self, raw_data: bytes, addr: tuple) -> None:
+        """
+        Parse raw packet and update latest message.
+
+        Called on every successfully received 1440-byte packet.
+        Override to add custom behavior on message receipt.
+
+        Parameters
+        ----------
+        raw_data : bytes
+            Raw 1440-byte packet from the robot.
+        addr : tuple
+            (host, port) of the sender.
 
         """
-        self.logger.debug('Syncing to packet boundary...')
-        discarded = 0
-        sock: socket.socket = cast(socket.socket, self.sock)
+        try:
+            self._message = DobotFeedbackModel.from_bytes(raw_data)
 
-        while True:
-            # Fill buffer with at least one full packet worth of data
-            while len(self._buffer) < PACKET_SIZE:
-                if chunk := sock.recv(4096):
-                    self._buffer.extend(chunk)
+            if self._callbacks:
+                for publish in self._callbacks:
+                    publish(self._message)
 
-                else:
-                    raise ConnectionError('CR5 closed connection during sync')
-            # Search for magic header
-            idx: int = self._buffer.find(MAGIC)
+            if self._message.error_code != 0:
+                self._log.debug('Robot reported an error status!')
 
-            if idx == 0:
-                # Already aligned
-                if discarded > 0:
-                    self.logger.warning(
-                        f'Sync: discarded {discarded} bytes to realign')
-                return
+        except (ValueError, struct.error) as e:
+            self._on_error(f'Parsing error: {e}')
 
-            elif idx > 0:
-                # Discard bytes before the header
-                discarded += idx
-                del self._buffer[:idx]
+    def _on_error(self, error_msg: str) -> None:
+        """
+        Handle an error condition.
 
-            else:
-                # Magic not found -- discard all but last 3 bytes
-                # (header might be split across next recv)
-                discarded += len(self._buffer) - 3
-                del self._buffer[:-3]
+        Override to route errors to a logger or ROS2 node.
+
+        Parameters
+        ----------
+        error_msg : str
+            Human-readable error description.
+
+        """
+        self._log.error(f'[ERROR] {error_msg}')
+
+    def _on_connect(self, addr: tuple) -> None:
+        """
+        Handle connection establishment with the robot.
+
+        Called after a successful TCP connection to the feedback port.
+        Override to add custom connect behavior.
+
+        Parameters
+        ----------
+        addr : tuple
+            (host, port) of the connected robot.
+
+        """
+        self._log.info(f'[STATE] Session started with {addr}')
+
+    def _on_disconnect(self, addr: tuple) -> None:
+        """
+        Handle an server disconnection.
+
+        Override to add custom disconnect behavior such as
+        triggering a reconnect attempt.
+
+        Parameters
+        ----------
+        addr : tuple
+            (host, port) of the disconnected robot.
+
+        """
+        self._log.info(f'[STATE] Session ended with {addr}')

@@ -1,5 +1,5 @@
 cr5_msgs/CartesianPose target
-float64 speed
+int16 speed
 ---
 bool success
 string message
