@@ -35,7 +35,7 @@ class DobotFeedbackClient:
 
     Extend by overriding the hook methods:
         _on_connect, _on_disconnect, _on_error, _on_message
-Dev
+
     """
 
     _instance: Optional[Self] = None
