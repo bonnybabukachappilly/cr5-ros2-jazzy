@@ -35,7 +35,7 @@ class DobotFeedbackClient:
 
     Extend by overriding the hook methods:
         _on_connect, _on_disconnect, _on_error, _on_message
-
+Dev
     """
 
     _instance: Optional[Self] = None
@@ -49,7 +49,7 @@ class DobotFeedbackClient:
 
     def __new__(cls, host: Optional[str] = None,
                 log: Optional[RcutilsLogger] = None,
-                port: int = 29999) -> Self:
+                port: int = 30004) -> Self:
 
         if cls._instance is None:
             if host is None or log is None:
@@ -65,7 +65,7 @@ class DobotFeedbackClient:
             self,
             host: Optional[str] = None,
             log: Optional[RcutilsLogger] = None,
-            port: int = 29999,
+            port: int = 30004,
             buffer_size: int = 1440) -> None:
         """
         Initialise the feedback client.
@@ -227,14 +227,15 @@ class DobotFeedbackClient:
             while self._is_running:
                 time_since_last: float = (
                     time.monotonic() - self._last_valid_packet_time)
-
-                if time_since_last > self._watchdog_threshold:
+                # Log once per second to avoid flooding
+                if (
+                        time_since_last > self._watchdog_threshold
+                        and int(time_since_last) > int(time_since_last - 0.008)
+                ):
                     self._log.error(
-                        'Watchdog Triggered: No valid data for' +
-                        f' {time_since_last:.3f}s'
+                        f'Watchdog triggered: no valid data for '
+                        f'{time_since_last:.3f}s'
                     )
-
-                    self._last_valid_packet_time = time.monotonic()
                 try:
                     chunk: bytes = self._socket.recv(4096)
                     if not chunk:
@@ -248,13 +249,13 @@ class DobotFeedbackClient:
                     msg_size = struct.unpack_from('<H', stream_buffer, 0)[0]
 
                     if msg_size == self._buffer_size:
-                        self._last_valid_packet_time = time.monotonic()
+                        # self._last_valid_packet_time = time.monotonic()
                         if len(stream_buffer) >= (self._buffer_size * 2):
                             del stream_buffer[:self._buffer_size]
                             continue
 
                         packet = bytes(stream_buffer[:self._buffer_size])
-                        self._last_valid_packet_time = time.monotonic()
+                        # self._last_valid_packet_time = time.monotonic()
 
                         self._on_message(packet, (self._host, self._port))
                         del stream_buffer[:self._buffer_size]
@@ -288,6 +289,8 @@ class DobotFeedbackClient:
         """
         try:
             self._message = DobotFeedbackModel.from_bytes(raw_data)
+
+            self._last_valid_packet_time = time.monotonic()
 
             if self._callbacks:
                 for publish in self._callbacks:
