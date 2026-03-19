@@ -1,0 +1,23 @@
+{
+    "editor.formatOnSave": true,
+    "[python]": {
+        "editor.defaultFormatter": "ms-python.autopep8"
+    },
+    "python.analysis.languageServerMode": "default",
+    "python.analysis.indexing": false,
+    "isort.args": [
+        "--force-sort-within-sections",
+        "--case-sensitive"
+    ],
+    "flake8.args": [
+        "--extend-ignore=I101"
+    ],
+    "python.autoComplete.extraPaths": [
+        "./install/**/lib/python3.*/site-packages",
+        "./build/cr5_msgs/rosidl_generator_py"
+    ],
+    "python.analysis.extraPaths": [
+        "./install/**/lib/python3.*/site-packages",
+        "./build/cr5_msgs/rosidl_generator_py"
+    ]
+}

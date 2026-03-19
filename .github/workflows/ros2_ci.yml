@@ -2,12 +2,11 @@ name: ROS2 CI
 
 on:
   push:
-    branches: [ production, dev ]
+    branches: [production, dev]
   pull_request:
-    branches: [ production, dev ]
+    branches: [production, dev]
 
 jobs:
-
   lint:
     name: Lint
     runs-on: ubuntu-24.04
@@ -25,25 +24,31 @@ jobs:
             ros-jazzy-ament-xmllint
 
       - name: Lint Python (flake8)
+        shell: bash
         run: |
           if find src -name "*.py" | grep -q .; then
-            find src -name "*.py" -exec ament_flake8 {} +
+            . /opt/ros/jazzy/setup.bash
+            find src -name "*.py" | xargs ament_flake8
           else
             echo "No Python files yet -- skipping"
           fi
 
       - name: Lint Python (pep257)
+        shell: bash
         run: |
           if find src -name "*.py" | grep -q .; then
-            find src -name "*.py" -exec ament_pep257 {} +
+            . /opt/ros/jazzy/setup.bash
+            find src -name "*.py" | xargs ament_pep257
           else
             echo "No Python files yet -- skipping"
           fi
 
       - name: Lint XML
+        shell: bash
         run: |
           if find src -name "*.xml" | grep -q .; then
-            find src -name "*.xml" -exec ament_xmllint {} +
+            . /opt/ros/jazzy/setup.bash
+            find src -name "*.xml" | xargs -I{} ament_xmllint {}
           else
             echo "No XML files yet -- skipping"
           fi
@@ -87,6 +92,18 @@ jobs:
             colcon test --return-code-on-test-failure
           else
             echo "Nothing built yet -- skipping tests"
+          fi
+
+      - name: Show test results
+        shell: bash
+        if: always()
+        run: |
+          . /opt/ros/jazzy/setup.bash
+          if [ -d "install" ]; then
+            . install/setup.bash
+            colcon test-result --verbose
+          else
+            echo "No test results yet"
           fi
 
   dependency-check:

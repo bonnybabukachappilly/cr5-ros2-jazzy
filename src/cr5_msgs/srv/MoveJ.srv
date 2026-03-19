@@ -1,0 +1,5 @@
+cr5_msgs/CartesianPose target
+int16 speed
+---
+bool success
+string message
