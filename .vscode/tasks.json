@@ -175,6 +175,7 @@
             "options": [
                 "cr5_driver",
                 "cr5_msgs",
+                "cr5_description"
             ]
         }
     ]
